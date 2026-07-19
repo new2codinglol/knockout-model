@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# local handoff / internal notes — not part of the public project
+PROGRESS.md
+FRONTEND_LOG.md
+site/_preview_*.png
