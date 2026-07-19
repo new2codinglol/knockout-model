@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Knockout Model · World Cup 2026</title>
+<meta name="description" content="Elo + Poisson + a de-vigged bookmaker blend: a live dashboard of win probabilities for the remaining World Cup 2026 matches, the model versus the market, and the model's calibration record.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#9917;</text></svg>">
+<style>
+/* ==================================================================
+   The Knockout Model — "Neon Onyx" dashboard: committed dark, onyx
+   surfaces, green-tinted OKLCH neutrals, one neon-green accent used
+   sparingly (panel ticks, KPI numbers). No light mode. Chart series
+   use the spec's validated hexes (see charts.py).
+================================================================== */
+:root{
+  --bg:        #0a0b0a;
+  --surface:   oklch(0.165 0.009 150);
+  --surface-2: oklch(0.2 0.011 150);
+  --hairline:  oklch(0.255 0.012 150);
+  --ink:       oklch(0.93 0.01 150);
+  --ink-2:     oklch(0.72 0.015 150);
+  --muted:     oklch(0.63 0.016 150);        /* lifted from 0.55 for AA on small notes/axis text */
+  --accent:    #4ade80;
+  --a:         #16a34a;                  /* team A / model-higher / scored */
+  --draw:      oklch(0.36 0.008 150);
+  --b:         #c026d3;                  /* team B / market-higher / conceded */
+  --good:      #4ade80;
+  --bad:       #f43f5e;
+  --seg-ink:   #04140a;
+  --gap:       .9rem;                    /* single spacing token: grid, KPI, stack, section rhythm */
+  --font-body: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --font-mono: ui-monospace,"SF Mono","Cascadia Code","Roboto Mono",Menlo,Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--ink);
+  font-family:var(--font-body);font-size:1rem;line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+.num,td.num,th{font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
+::selection{background:var(--accent);color:#04140a}
+b,strong{font-weight:650}
+
+.wrap{max-width:80rem;margin:0 auto;padding:0 clamp(1rem,3vw,1.8rem)}
+
+/* ---------- slim top bar ---------- */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;
+  padding:1rem 0 1.1rem;border-bottom:1px solid var(--hairline);position:relative;
+}
+.topbar::after{content:"";position:absolute;inset:-40% -10% auto;height:120%;z-index:-1;pointer-events:none;
+  background:radial-gradient(30rem 12rem at 12% 0%, oklch(0.5 0.16 150 / .10), transparent 65%)}
+.brand{display:flex;align-items:baseline;gap:.9rem;flex-wrap:wrap}
+.wordmark{font-weight:750;font-size:1.1rem;letter-spacing:-.02em}
+.wordmark span{color:var(--accent)}
+.chip{
+  font-family:var(--font-mono);font-size:.7rem;letter-spacing:.02em;color:var(--ink-2);
+  border:1px solid var(--hairline);border-radius:99px;padding:.2rem .6rem;
+}
+.topmeta{font-family:var(--font-mono);font-size:.72rem;color:var(--muted);text-align:right;line-height:1.5}
+
+/* ---------- KPI row ---------- */
+.kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--gap);margin:var(--gap) 0}
+.kpi-tile{background:var(--surface);border:1px solid var(--hairline);border-radius:10px;padding:1rem 1.1rem}
+.kpi-val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:2rem;letter-spacing:-.02em;color:var(--accent);line-height:1}
+.kpi-val small{font-size:.42em;font-weight:600;color:var(--ink-2);margin-left:.15em;letter-spacing:0}
+.kpi-lab{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-top:.55rem}
+
+/* ---------- panel grid ---------- */
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:var(--gap);padding-bottom:var(--gap);grid-auto-flow:row dense}
+.panel{
+  grid-column:span 12;background:var(--surface);border:1px solid var(--hairline);
+  border-radius:12px;padding:1.1rem 1.2rem;min-width:0;
+  display:flex;flex-direction:column;                 /* stretch to row height; distribute inner space */
+}
+/* Equal-height rows: keep content top-aligned so any leftover space falls to the
+   card's bottom edge (reads as padding), never pooled mid-card between a note and a
+   disclosure. A single hairline-topped footer band groups the trailing meta. */
+.panel > .chart-note:last-child{margin-bottom:0}
+.panel .chart{max-width:900px}
+.c4{grid-column:span 4}.c6{grid-column:span 6}.c8{grid-column:span 8}.c12{grid-column:span 12}
+.stack{grid-column:span 4;display:grid;gap:var(--gap);grid-template-rows:1fr 1fr}
+.stack .panel{grid-column:auto}
+.panel-h{
+  display:flex;align-items:center;font-family:var(--font-mono);font-weight:600;
+  font-size:.74rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);margin-bottom:1rem;
+}
+.panel-h::before{content:"";display:inline-block;width:2px;height:.9em;background:var(--accent);margin-right:.55em;flex:none}
+.chart-note{font-size:.76rem;color:var(--muted);margin-top:.8rem;max-width:64ch}
+
+/* ---------- chart (SVG) shared type ---------- */
+.chart{display:block}
+.chart .c-lab{font-family:var(--font-mono);font-size:12.5px;fill:var(--ink-2)}
+.chart .c-lab.team{fill:var(--ink);font-weight:600}
+.chart .c-val{font-family:var(--font-mono);font-size:13px;font-weight:600;fill:var(--ink)}
+.chart .c-end{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.chart .c-axis{font-family:var(--font-mono);font-size:11px;fill:var(--muted)}
+.chart .c-grid{stroke:var(--hairline);stroke-width:1}
+.chart .c-grid.zero{stroke:var(--muted);stroke-width:1}
+.chart .c-ref{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4}
+.c-details{margin-top:.9rem}
+/* disclosures read as real toggles: bordered chip, rotating chevron, hover + focus states */
+.c-details summary,details.record summary{
+  display:inline-flex;align-items:center;gap:.5rem;cursor:pointer;list-style:none;
+  font-family:var(--font-mono);font-size:.74rem;letter-spacing:.02em;color:var(--ink-2);
+  border:1px solid var(--hairline);border-radius:7px;padding:.4rem .72rem;
+  transition:color .15s ease,border-color .15s ease,background .15s ease;
+}
+.c-details summary::-webkit-details-marker,details.record summary::-webkit-details-marker{display:none}
+.c-details summary::before,details.record summary::before{
+  content:"";width:.5em;height:.5em;border-right:2px solid currentColor;border-bottom:2px solid currentColor;
+  transform:rotate(-45deg);transition:transform .18s ease;margin-bottom:.12em;
+}
+details[open] > summary::before{transform:rotate(45deg)}
+.c-details summary:hover,details.record summary:hover{color:var(--ink);border-color:var(--muted);background:var(--surface-2)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- winner ---------- */
+details.record{margin-top:1rem}
+
+/* ---------- featured W/D/L ---------- */
+.legend{display:flex;flex-wrap:wrap;gap:.9rem;font-size:.76rem;color:var(--ink-2);margin-bottom:1rem}
+.legend i{display:inline-block;width:.72em;height:.72em;border-radius:2px;margin-right:.35em;vertical-align:-.05em}
+.legend .sw-a i{background:var(--a)}
+.legend .sw-d i{background:var(--draw)}
+.legend .sw-b i{background:var(--b)}
+.rrow{margin-bottom:.9rem}
+.rrow:last-of-type{margin-bottom:0}
+.rlabel{font-size:.78rem;color:var(--ink-2);margin-bottom:.3rem;display:flex;justify-content:space-between;gap:1rem}
+.rlabel .r-adv{color:var(--muted);font-family:var(--font-mono);font-size:.74rem}
+.rlabel .r-adv b{color:var(--ink-2)}
+.wdl{display:flex;gap:2px;height:28px;border-radius:6px;overflow:hidden}
+.wdl .seg{display:flex;align-items:center;justify-content:center;min-width:0;font-family:var(--font-mono);font-weight:650;font-size:.82rem;white-space:nowrap}
+.wdl .seg.a{background:var(--a);color:var(--seg-ink)}
+.wdl .seg.d{background:var(--draw);color:var(--ink-2)}
+.wdl .seg.b{background:var(--b);color:#160318}
+.wdl .seg.slim{font-size:0}
+.steam{margin-top:1rem;padding:.6rem .85rem;border:1px solid var(--hairline);border-radius:8px;font-size:.78rem;color:var(--muted);background:var(--surface-2)}
+.steam b{color:var(--ink-2)}
+
+/* ---------- fixtures ---------- */
+.fixture{padding:.85rem 0;border-top:1px solid var(--hairline)}
+.fixture:first-of-type{border-top:0;padding-top:.2rem}
+.fx-head{display:flex;justify-content:space-between;align-items:baseline;gap:.6rem}
+.fx-date{font-family:var(--font-mono);font-weight:600;font-size:.78rem;color:var(--ink)}
+.fx-cond{font-family:var(--font-mono);font-size:.68rem;color:var(--muted)}
+.fx-teams{display:flex;justify-content:space-between;font-weight:600;font-size:.82rem;margin:.35rem 0 .3rem}
+.fixture .wdl{height:22px}
+.fixture .wdl .seg{font-size:.72rem}
+.fx-note{font-size:.76rem;color:var(--muted);margin-top:.35rem}
+.fx-note b{color:var(--ink-2);font-weight:600}
+
+/* ---------- calibration ---------- */
+.record-head{display:flex;flex-wrap:wrap;align-items:center;gap:1.6rem;margin-bottom:1.1rem}
+.hit-fig{font-family:var(--font-mono);font-weight:700;font-size:2.6rem;line-height:1;color:var(--accent);letter-spacing:-.02em}
+.hit-fig small{font-size:.32em;font-weight:600;color:var(--ink-2)}
+.hit-cap{font-size:.78rem;color:var(--muted);max-width:26ch}
+.strip{display:flex;flex-wrap:wrap;gap:4px;max-width:44rem}
+.cell{width:16px;height:20px;border-radius:3px;background:var(--good)}
+.cell.miss{background:none;border:1.5px solid var(--bad)}
+.strip-note{font-size:.74rem;color:var(--muted);margin-top:.6rem}
+
+/* ---------- tables ---------- */
+.tablewrap{overflow-x:auto;margin-top:.8rem}
+table{border-collapse:collapse;width:100%;font-size:.82rem}
+th{text-align:left;font-weight:600;color:var(--muted);font-size:.68rem;letter-spacing:.05em;text-transform:uppercase;padding:.4rem .8rem .4rem 0;border-bottom:1px solid var(--hairline);white-space:nowrap}
+td{padding:.42rem .8rem .42rem 0;border-bottom:1px solid var(--hairline);color:var(--ink-2);white-space:nowrap}
+td .yes{color:var(--good);font-weight:600}
+td .no{color:var(--bad)}
+tbody tr{transition:background .12s ease}
+tbody tr:hover td{background:var(--surface-2)}
+.panel table{min-width:0}
+.panel .elo-t td:last-child,.panel .elo-t th:last-child{text-align:right;padding-right:0}
+.panel .elo-t td{padding-top:.52rem;padding-bottom:.52rem}   /* airier rows: breathe into the tall calibration neighbour, easier to scan */
+.panel .fournations td{color:var(--ink);font-weight:600}
+
+/* ---------- goals minis ---------- */
+.mrow{display:grid;grid-template-columns:5rem 1fr 2.6rem;gap:.55rem;align-items:center;margin-bottom:.5rem;font-size:.8rem}
+.mrow:last-child{margin-bottom:0}
+.mteam{color:var(--ink-2)}
+.mtrack{height:11px;position:relative;background:oklch(0.23 0.009 150);border-radius:0 3px 3px 0}
+.mbar{position:absolute;left:0;top:0;bottom:0;border-radius:0 3px 3px 0}
+.scored .mbar{background:var(--a)}
+.conceded .mbar{background:var(--b)}
+.mval{font-family:var(--font-mono);font-weight:600;text-align:right}
+
+/* ---------- V2 extras: goals markets + player props ---------- */
+.gm-legend{display:flex;flex-wrap:wrap;gap:.9rem;font-size:.72rem;color:var(--ink-2);margin-bottom:.9rem}
+.gm-legend i{display:inline-block;width:.72em;height:.72em;border-radius:2px;margin-right:.35em;vertical-align:-.05em}
+.gm-legend .l-mdl i{background:var(--a)}
+.gm-legend .l-mkt i{background:var(--b)}
+.gm-legend .l-bl i,.gm-legend .l-mkt-tick i{width:2px;height:.9em;border-radius:1px}
+.gm-legend .l-bl i{background:var(--ink)}
+.gm-legend .l-mkt-tick i{background:var(--b)}
+.gmrow{display:grid;grid-template-columns:6rem 1fr 5.4rem;gap:.6rem;align-items:center;margin-bottom:.6rem;font-size:.8rem}
+.gmrow:last-of-type{margin-bottom:0}
+.gmlabel{color:var(--ink-2)}
+.gmtrack{position:relative;height:16px;background:oklch(0.23 0.009 150);border-radius:3px}
+.gmbar{position:absolute;left:0;height:6px;border-radius:0 3px 3px 0}
+.gmbar.mdl{top:1px;background:var(--a)}
+.gmbar.mkt{top:9px;background:var(--b)}
+.gmtick{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ink);border-radius:1px}
+.gmvals{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.gmvals .gm-mkt{color:var(--muted);margin-left:.45em}
+.gm-scores{margin-top:1rem;border-top:1px solid var(--hairline);padding-top:.85rem}
+.gm-sc-h{font-family:var(--font-mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:.6rem}
+.scrow{display:grid;grid-template-columns:2.8rem 1fr 3rem;gap:.55rem;align-items:center;margin-bottom:.42rem;font-size:.78rem}
+.scrow:last-child{margin-bottom:0}
+.sclab{color:var(--ink-2)}
+.sctrack{height:9px;background:oklch(0.23 0.009 150);border-radius:0 3px 3px 0;position:relative}
+.scbar{position:absolute;left:0;top:0;bottom:0;background:var(--a);border-radius:0 3px 3px 0;opacity:.72}
+.scval{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;color:var(--ink-2)}
+.pp-t td{vertical-align:middle}
+.pp-name{color:var(--ink);white-space:normal;min-width:6.5rem}
+.pp-team{display:block;font-size:.66rem;color:var(--muted);font-family:var(--font-mono);letter-spacing:.03em;text-transform:uppercase}
+.ppscore{display:flex;align-items:center;gap:.55rem;min-width:9rem}
+.pptrack{position:relative;flex:1;height:10px;background:oklch(0.23 0.009 150);border-radius:0 3px 3px 0;min-width:3.5rem}
+.ppbar{position:absolute;left:0;top:0;bottom:0;background:var(--a);border-radius:0 3px 3px 0}
+.pptick{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--b);border-radius:1px}
+.ppnums{white-space:nowrap;font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:.74rem}
+.ppnums .gm-mkt{color:var(--muted);margin-left:.35em}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--hairline);padding:1.4rem 0 2.4rem;font-size:.76rem;color:var(--muted)}
+footer p{max-width:80ch;margin-bottom:.45rem}
+footer b{color:var(--ink-2)}
+footer code{font-family:var(--font-mono);color:var(--ink-2)}
+
+/* ---------- motion: ambient only, reduced-motion safe ---------- */
+@media (prefers-reduced-motion: no-preference){
+  .topbar::after{animation:breathe 14s ease-in-out infinite alternate}
+  @keyframes breathe{from{opacity:.6}to{opacity:1}}
+}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}.topbar::after{animation:none}}
+
+/* ---------- scroll reveal: native scroll-driven, no JS ----------
+   Behind @supports so unsupported browsers show everything (no JS, fully
+   visible). Longhands (not shorthand) so animation-duration stays auto for
+   the view() timeline. Disabled entirely under reduced-motion. */
+@supports (animation-timeline: view()){
+  @media (prefers-reduced-motion: no-preference){
+    .kpi-tile,.grid > .panel,.stack > .panel{
+      animation-name:reveal-up;
+      animation-fill-mode:both;
+      animation-timing-function:cubic-bezier(.4,0,.2,1);
+      animation-timeline:view();
+      animation-range:entry 0% entry 30%;
+    }
+    @keyframes reveal-up{
+      from{opacity:0;transform:translateY(18px)}
+      to{opacity:1;transform:none}
+    }
+  }
+}
+
+/* ---------- responsive: collapse grid to one column ---------- */
+@media (max-width:900px){
+  .c4,.c6,.c8,.c12,.stack{grid-column:span 12}
+  .topmeta{text-align:left}
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="topbar">
+  <div class="brand">
+    <div class="wordmark">The Knockout <span>Model</span></div>
+    <span class="chip">{{METHOD_CHIP}}</span>
+  </div>
+  <div class="topmeta">World Cup 2026 &middot; knockout stage<br>data {{GENERATED_HUMAN}} &middot; not betting advice</div>
+</header>
+
+<!-- ============================ KPI ROW ============================ -->
+<div class="kpi">
+  {{KPI_TILES}}
+</div>
+
+<!-- ============================ PANEL GRID ============================ -->
+<main class="grid">
+
+  <section class="panel c8">
+    <h3 class="panel-h">Chance of winning the tournament</h3>
+    {{WINNER_CHART}}
+    <p class="chart-note">{{WINNER_NOTE}}</p>
+    <details class="c-details">
+      <summary>Winner probabilities table</summary>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Team</th><th>Blend</th><th>Model only</th></tr></thead>
+        <tbody>{{WINNER_TABLE_ROWS}}</tbody>
+      </table></div>
+    </details>
+  </section>
+
+  <div class="stack">
+    <section class="panel scored">
+      <h3 class="panel-h">Goals scored per game</h3>
+      {{SCORED_ROWS}}
+      <p class="chart-note">Remaining semifinalists, all rounds of WC 2026.</p>
+    </section>
+    <section class="panel conceded">
+      <h3 class="panel-h">Goals conceded per game</h3>
+      {{CONCEDED_ROWS}}
+      <p class="chart-note">Lower is a meaner defence.</p>
+    </section>
+  </div>
+
+  <!-- featured W/D/L + divergence (drop out together when no market data) -->
+  {{FEATURED_WDL_PANEL}}
+  {{DIVERGENCE_PANEL}}
+
+  <!-- odds timeline (drops out when no odds history) -->
+  {{TIMELINE_PANEL}}
+
+  <section class="panel c4">
+    <h3 class="panel-h">Remaining fixtures</h3>
+    {{FIXTURE_ROWS}}
+    <p class="chart-note">{{FIXTURES_NOTE}}</p>
+  </section>
+
+  <!-- per-match V2 extras: goals markets + player props (empty when no match has extras) -->
+  {{EXTRAS_PANELS}}
+
+  <section class="panel c8">
+    <h3 class="panel-h">Calibration &middot; model probability of the outcome that happened</h3>
+    <div class="record-head">
+      <div class="hit-fig">{{HIT_RATE}}<small>%</small></div>
+      <p class="hit-cap">{{HIT_COUNT}} of {{RETRO_N}} knockout games called &mdash; the model&rsquo;s top 90-minute pick was the result</p>
+      <div>
+        <div class="strip" role="img" aria-label="{{RETRO_N}} knockout matches in order: filled green cells were called correctly, red-outlined cells were missed.">
+          {{RETRO_STRIP}}
+        </div>
+        <p class="strip-note">One cell per knockout match, in order played. Filled = called; outlined = missed.</p>
+      </div>
+    </div>
+    {{CALIB_CHART}}
+    <p class="chart-note">Each dot is one knockout match. Below the dashed 33% line the model read the match worse than a blind three-way guess. Filled green = called, red ring = missed.</p>
+    <details class="record">
+      <summary>Full match-by-match record</summary>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Date</th><th>Match</th><th>Model W / D / L</th><th>Result</th><th>Called</th></tr></thead>
+        <tbody>{{RETRO_ROWS}}</tbody>
+      </table></div>
+    </details>
+  </section>
+
+  <section class="panel c4">
+    <h3 class="panel-h">Current Elo &middot; top 12</h3>
+    <div class="tablewrap"><table class="elo-t">
+      <thead><tr><th>#</th><th>Team</th><th>Elo</th></tr></thead>
+      <tbody>{{ELO_ROWS}}</tbody>
+    </table></div>
+    <p class="chart-note">Bold = remaining semifinalists.</p>
+  </section>
+
+</main>
+
+<footer>
+  <p><b>Method:</b> Elo over ~49,500 internationals sets an expected strength gap; a Poisson goal model turns that into a full scoreline distribution (win / draw / loss, plus advancement through extra time and penalties); 90-minute probabilities are blended {{MODEL_PCT}}/{{MKT_PCT}} with a de-vigged bookmaker consensus.{{V2_NOTE}}</p>
+  <p><b>Caveats:</b> the blend weight is a fixed {{MODEL_PCT}}/{{MKT_PCT}} split, not fitted per match; where the books have not priced a pairing, the model stands alone (those fixtures show model-only numbers). This is a statistical model, not betting advice &mdash; a 60% favourite still loses two times in five.</p>
+  <p>Generated {{GENERATED_ISO}} from <code>data/site_data.json</code>. Refresh with <code>python site/build.py</code> after each <code>python predict.py</code> run.</p>
+</footer>
+
+</div>
+
+<!--
+  DATA BLOCK — the raw payload this page was generated from.
+  index.html is GENERATED: do not edit it by hand.
+  Regenerate with `python site/build.py` after each `python predict.py` run.
+-->
+<script type="application/json" id="site-data">{{DATA_JSON}}</script>
+</body>
+</html>

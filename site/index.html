@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Knockout Model · World Cup 2026</title>
+<meta name="description" content="Elo + Poisson + a de-vigged bookmaker blend: a live dashboard of win probabilities for the remaining World Cup 2026 matches, the model versus the market, and the model's calibration record.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#9917;</text></svg>">
+<style>
+/* ==================================================================
+   The Knockout Model — "Neon Onyx" dashboard: committed dark, onyx
+   surfaces, green-tinted OKLCH neutrals, one neon-green accent used
+   sparingly (panel ticks, KPI numbers). No light mode. Chart series
+   use the spec's validated hexes (see charts.py).
+================================================================== */
+:root{
+  --bg:        #0a0b0a;
+  --surface:   oklch(0.165 0.009 150);
+  --surface-2: oklch(0.2 0.011 150);
+  --hairline:  oklch(0.255 0.012 150);
+  --ink:       oklch(0.93 0.01 150);
+  --ink-2:     oklch(0.72 0.015 150);
+  --muted:     oklch(0.63 0.016 150);        /* lifted from 0.55 for AA on small notes/axis text */
+  --accent:    #4ade80;
+  --a:         #16a34a;                  /* team A / model-higher / scored */
+  --draw:      oklch(0.36 0.008 150);
+  --b:         #c026d3;                  /* team B / market-higher / conceded */
+  --good:      #4ade80;
+  --bad:       #f43f5e;
+  --seg-ink:   #04140a;
+  --gap:       .9rem;                    /* single spacing token: grid, KPI, stack, section rhythm */
+  --font-body: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --font-mono: ui-monospace,"SF Mono","Cascadia Code","Roboto Mono",Menlo,Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--ink);
+  font-family:var(--font-body);font-size:1rem;line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+.num,td.num,th{font-variant-numeric:tabular-nums;font-family:var(--font-mono)}
+::selection{background:var(--accent);color:#04140a}
+b,strong{font-weight:650}
+
+.wrap{max-width:80rem;margin:0 auto;padding:0 clamp(1rem,3vw,1.8rem)}
+
+/* ---------- slim top bar ---------- */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;
+  padding:1rem 0 1.1rem;border-bottom:1px solid var(--hairline);position:relative;
+}
+.topbar::after{content:"";position:absolute;inset:-40% -10% auto;height:120%;z-index:-1;pointer-events:none;
+  background:radial-gradient(30rem 12rem at 12% 0%, oklch(0.5 0.16 150 / .10), transparent 65%)}
+.brand{display:flex;align-items:baseline;gap:.9rem;flex-wrap:wrap}
+.wordmark{font-weight:750;font-size:1.1rem;letter-spacing:-.02em}
+.wordmark span{color:var(--accent)}
+.chip{
+  font-family:var(--font-mono);font-size:.7rem;letter-spacing:.02em;color:var(--ink-2);
+  border:1px solid var(--hairline);border-radius:99px;padding:.2rem .6rem;
+}
+.topmeta{font-family:var(--font-mono);font-size:.72rem;color:var(--muted);text-align:right;line-height:1.5}
+
+/* ---------- KPI row ---------- */
+.kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--gap);margin:var(--gap) 0}
+.kpi-tile{background:var(--surface);border:1px solid var(--hairline);border-radius:10px;padding:1rem 1.1rem}
+.kpi-val{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:2rem;letter-spacing:-.02em;color:var(--accent);line-height:1}
+.kpi-val small{font-size:.42em;font-weight:600;color:var(--ink-2);margin-left:.15em;letter-spacing:0}
+.kpi-lab{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-top:.55rem}
+
+/* ---------- panel grid ---------- */
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:var(--gap);padding-bottom:var(--gap);grid-auto-flow:row dense}
+.panel{
+  grid-column:span 12;background:var(--surface);border:1px solid var(--hairline);
+  border-radius:12px;padding:1.1rem 1.2rem;min-width:0;
+  display:flex;flex-direction:column;                 /* stretch to row height; distribute inner space */
+}
+/* Equal-height rows: keep content top-aligned so any leftover space falls to the
+   card's bottom edge (reads as padding), never pooled mid-card between a note and a
+   disclosure. A single hairline-topped footer band groups the trailing meta. */
+.panel > .chart-note:last-child{margin-bottom:0}
+.panel .chart{max-width:900px}
+.c4{grid-column:span 4}.c6{grid-column:span 6}.c8{grid-column:span 8}.c12{grid-column:span 12}
+.stack{grid-column:span 4;display:grid;gap:var(--gap);grid-template-rows:1fr 1fr}
+.stack .panel{grid-column:auto}
+.panel-h{
+  display:flex;align-items:center;font-family:var(--font-mono);font-weight:600;
+  font-size:.74rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);margin-bottom:1rem;
+}
+.panel-h::before{content:"";display:inline-block;width:2px;height:.9em;background:var(--accent);margin-right:.55em;flex:none}
+.chart-note{font-size:.76rem;color:var(--muted);margin-top:.8rem;max-width:64ch}
+
+/* ---------- chart (SVG) shared type ---------- */
+.chart{display:block}
+.chart .c-lab{font-family:var(--font-mono);font-size:12.5px;fill:var(--ink-2)}
+.chart .c-lab.team{fill:var(--ink);font-weight:600}
+.chart .c-val{font-family:var(--font-mono);font-size:13px;font-weight:600;fill:var(--ink)}
+.chart .c-end{font-family:var(--font-mono);font-size:12.5px;font-weight:600}
+.chart .c-axis{font-family:var(--font-mono);font-size:11px;fill:var(--muted)}
+.chart .c-grid{stroke:var(--hairline);stroke-width:1}
+.chart .c-grid.zero{stroke:var(--muted);stroke-width:1}
+.chart .c-ref{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4}
+.c-details{margin-top:.9rem}
+/* disclosures read as real toggles: bordered chip, rotating chevron, hover + focus states */
+.c-details summary,details.record summary{
+  display:inline-flex;align-items:center;gap:.5rem;cursor:pointer;list-style:none;
+  font-family:var(--font-mono);font-size:.74rem;letter-spacing:.02em;color:var(--ink-2);
+  border:1px solid var(--hairline);border-radius:7px;padding:.4rem .72rem;
+  transition:color .15s ease,border-color .15s ease,background .15s ease;
+}
+.c-details summary::-webkit-details-marker,details.record summary::-webkit-details-marker{display:none}
+.c-details summary::before,details.record summary::before{
+  content:"";width:.5em;height:.5em;border-right:2px solid currentColor;border-bottom:2px solid currentColor;
+  transform:rotate(-45deg);transition:transform .18s ease;margin-bottom:.12em;
+}
+details[open] > summary::before{transform:rotate(45deg)}
+.c-details summary:hover,details.record summary:hover{color:var(--ink);border-color:var(--muted);background:var(--surface-2)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------- winner ---------- */
+details.record{margin-top:1rem}
+
+/* ---------- featured W/D/L ---------- */
+.legend{display:flex;flex-wrap:wrap;gap:.9rem;font-size:.76rem;color:var(--ink-2);margin-bottom:1rem}
+.legend i{display:inline-block;width:.72em;height:.72em;border-radius:2px;margin-right:.35em;vertical-align:-.05em}
+.legend .sw-a i{background:var(--a)}
+.legend .sw-d i{background:var(--draw)}
+.legend .sw-b i{background:var(--b)}
+.rrow{margin-bottom:.9rem}
+.rrow:last-of-type{margin-bottom:0}
+.rlabel{font-size:.78rem;color:var(--ink-2);margin-bottom:.3rem;display:flex;justify-content:space-between;gap:1rem}
+.rlabel .r-adv{color:var(--muted);font-family:var(--font-mono);font-size:.74rem}
+.rlabel .r-adv b{color:var(--ink-2)}
+.wdl{display:flex;gap:2px;height:28px;border-radius:6px;overflow:hidden}
+.wdl .seg{display:flex;align-items:center;justify-content:center;min-width:0;font-family:var(--font-mono);font-weight:650;font-size:.82rem;white-space:nowrap}
+.wdl .seg.a{background:var(--a);color:var(--seg-ink)}
+.wdl .seg.d{background:var(--draw);color:var(--ink-2)}
+.wdl .seg.b{background:var(--b);color:#160318}
+.wdl .seg.slim{font-size:0}
+.steam{margin-top:1rem;padding:.6rem .85rem;border:1px solid var(--hairline);border-radius:8px;font-size:.78rem;color:var(--muted);background:var(--surface-2)}
+.steam b{color:var(--ink-2)}
+
+/* ---------- fixtures ---------- */
+.fixture{padding:.85rem 0;border-top:1px solid var(--hairline)}
+.fixture:first-of-type{border-top:0;padding-top:.2rem}
+.fx-head{display:flex;justify-content:space-between;align-items:baseline;gap:.6rem}
+.fx-date{font-family:var(--font-mono);font-weight:600;font-size:.78rem;color:var(--ink)}
+.fx-cond{font-family:var(--font-mono);font-size:.68rem;color:var(--muted)}
+.fx-teams{display:flex;justify-content:space-between;font-weight:600;font-size:.82rem;margin:.35rem 0 .3rem}
+.fixture .wdl{height:22px}
+.fixture .wdl .seg{font-size:.72rem}
+.fx-note{font-size:.76rem;color:var(--muted);margin-top:.35rem}
+.fx-note b{color:var(--ink-2);font-weight:600}
+
+/* ---------- calibration ---------- */
+.record-head{display:flex;flex-wrap:wrap;align-items:center;gap:1.6rem;margin-bottom:1.1rem}
+.hit-fig{font-family:var(--font-mono);font-weight:700;font-size:2.6rem;line-height:1;color:var(--accent);letter-spacing:-.02em}
+.hit-fig small{font-size:.32em;font-weight:600;color:var(--ink-2)}
+.hit-cap{font-size:.78rem;color:var(--muted);max-width:26ch}
+.strip{display:flex;flex-wrap:wrap;gap:4px;max-width:44rem}
+.cell{width:16px;height:20px;border-radius:3px;background:var(--good)}
+.cell.miss{background:none;border:1.5px solid var(--bad)}
+.strip-note{font-size:.74rem;color:var(--muted);margin-top:.6rem}
+
+/* ---------- tables ---------- */
+.tablewrap{overflow-x:auto;margin-top:.8rem}
+table{border-collapse:collapse;width:100%;font-size:.82rem}
+th{text-align:left;font-weight:600;color:var(--muted);font-size:.68rem;letter-spacing:.05em;text-transform:uppercase;padding:.4rem .8rem .4rem 0;border-bottom:1px solid var(--hairline);white-space:nowrap}
+td{padding:.42rem .8rem .42rem 0;border-bottom:1px solid var(--hairline);color:var(--ink-2);white-space:nowrap}
+td .yes{color:var(--good);font-weight:600}
+td .no{color:var(--bad)}
+tbody tr{transition:background .12s ease}
+tbody tr:hover td{background:var(--surface-2)}
+.panel table{min-width:0}
+.panel .elo-t td:last-child,.panel .elo-t th:last-child{text-align:right;padding-right:0}
+.panel .elo-t td{padding-top:.52rem;padding-bottom:.52rem}   /* airier rows: breathe into the tall calibration neighbour, easier to scan */
+.panel .fournations td{color:var(--ink);font-weight:600}
+
+/* ---------- goals minis ---------- */
+.mrow{display:grid;grid-template-columns:5rem 1fr 2.6rem;gap:.55rem;align-items:center;margin-bottom:.5rem;font-size:.8rem}
+.mrow:last-child{margin-bottom:0}
+.mteam{color:var(--ink-2)}
+.mtrack{height:11px;position:relative;background:oklch(0.23 0.009 150);border-radius:0 3px 3px 0}
+.mbar{position:absolute;left:0;top:0;bottom:0;border-radius:0 3px 3px 0}
+.scored .mbar{background:var(--a)}
+.conceded .mbar{background:var(--b)}
+.mval{font-family:var(--font-mono);font-weight:600;text-align:right}
+
+/* ---------- V2 extras: goals markets + player props ---------- */
+.gm-legend{display:flex;flex-wrap:wrap;gap:.9rem;font-size:.72rem;color:var(--ink-2);margin-bottom:.9rem}
+.gm-legend i{display:inline-block;width:.72em;height:.72em;border-radius:2px;margin-right:.35em;vertical-align:-.05em}
+.gm-legend .l-mdl i{background:var(--a)}
+.gm-legend .l-mkt i{background:var(--b)}
+.gm-legend .l-bl i,.gm-legend .l-mkt-tick i{width:2px;height:.9em;border-radius:1px}
+.gm-legend .l-bl i{background:var(--ink)}
+.gm-legend .l-mkt-tick i{background:var(--b)}
+.gmrow{display:grid;grid-template-columns:6rem 1fr 5.4rem;gap:.6rem;align-items:center;margin-bottom:.6rem;font-size:.8rem}
+.gmrow:last-of-type{margin-bottom:0}
+.gmlabel{color:var(--ink-2)}
+.gmtrack{position:relative;height:16px;background:oklch(0.23 0.009 150);border-radius:3px}
+.gmbar{position:absolute;left:0;height:6px;border-radius:0 3px 3px 0}
+.gmbar.mdl{top:1px;background:var(--a)}
+.gmbar.mkt{top:9px;background:var(--b)}
+.gmtick{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ink);border-radius:1px}
+.gmvals{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.gmvals .gm-mkt{color:var(--muted);margin-left:.45em}
+.gm-scores{margin-top:1rem;border-top:1px solid var(--hairline);padding-top:.85rem}
+.gm-sc-h{font-family:var(--font-mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:.6rem}
+.scrow{display:grid;grid-template-columns:2.8rem 1fr 3rem;gap:.55rem;align-items:center;margin-bottom:.42rem;font-size:.78rem}
+.scrow:last-child{margin-bottom:0}
+.sclab{color:var(--ink-2)}
+.sctrack{height:9px;background:oklch(0.23 0.009 150);border-radius:0 3px 3px 0;position:relative}
+.scbar{position:absolute;left:0;top:0;bottom:0;background:var(--a);border-radius:0 3px 3px 0;opacity:.72}
+.scval{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;color:var(--ink-2)}
+.pp-t td{vertical-align:middle}
+.pp-name{color:var(--ink);white-space:normal;min-width:6.5rem}
+.pp-team{display:block;font-size:.66rem;color:var(--muted);font-family:var(--font-mono);letter-spacing:.03em;text-transform:uppercase}
+.ppscore{display:flex;align-items:center;gap:.55rem;min-width:9rem}
+.pptrack{position:relative;flex:1;height:10px;background:oklch(0.23 0.009 150);border-radius:0 3px 3px 0;min-width:3.5rem}
+.ppbar{position:absolute;left:0;top:0;bottom:0;background:var(--a);border-radius:0 3px 3px 0}
+.pptick{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--b);border-radius:1px}
+.ppnums{white-space:nowrap;font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:.74rem}
+.ppnums .gm-mkt{color:var(--muted);margin-left:.35em}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--hairline);padding:1.4rem 0 2.4rem;font-size:.76rem;color:var(--muted)}
+footer p{max-width:80ch;margin-bottom:.45rem}
+footer b{color:var(--ink-2)}
+footer code{font-family:var(--font-mono);color:var(--ink-2)}
+
+/* ---------- motion: ambient only, reduced-motion safe ---------- */
+@media (prefers-reduced-motion: no-preference){
+  .topbar::after{animation:breathe 14s ease-in-out infinite alternate}
+  @keyframes breathe{from{opacity:.6}to{opacity:1}}
+}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}.topbar::after{animation:none}}
+
+/* ---------- scroll reveal: native scroll-driven, no JS ----------
+   Behind @supports so unsupported browsers show everything (no JS, fully
+   visible). Longhands (not shorthand) so animation-duration stays auto for
+   the view() timeline. Disabled entirely under reduced-motion. */
+@supports (animation-timeline: view()){
+  @media (prefers-reduced-motion: no-preference){
+    .kpi-tile,.grid > .panel,.stack > .panel{
+      animation-name:reveal-up;
+      animation-fill-mode:both;
+      animation-timing-function:cubic-bezier(.4,0,.2,1);
+      animation-timeline:view();
+      animation-range:entry 0% entry 30%;
+    }
+    @keyframes reveal-up{
+      from{opacity:0;transform:translateY(18px)}
+      to{opacity:1;transform:none}
+    }
+  }
+}
+
+/* ---------- responsive: collapse grid to one column ---------- */
+@media (max-width:900px){
+  .c4,.c6,.c8,.c12,.stack{grid-column:span 12}
+  .topmeta{text-align:left}
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="topbar">
+  <div class="brand">
+    <div class="wordmark">The Knockout <span>Model</span></div>
+    <span class="chip">model V2 &middot; Elo+offsets Poisson &middot; blend 30/70 with market</span>
+  </div>
+  <div class="topmeta">World Cup 2026 &middot; knockout stage<br>data 19 Jul 2026, 22:57 UTC &middot; not betting advice</div>
+</header>
+
+<!-- ============================ KPI ROW ============================ -->
+<div class="kpi">
+  <div class="kpi-tile"><div class="kpi-val">100%</div><div class="kpi-lab">Favourite &middot; Spain</div></div>
+<div class="kpi-tile"><div class="kpi-val">75<small>%</small></div><div class="kpi-lab">Calibration &middot; 24/32 called</div></div>
+</div>
+
+<!-- ============================ PANEL GRID ============================ -->
+<main class="grid">
+
+  <section class="panel c8">
+    <h3 class="panel-h">Chance of winning the tournament</h3>
+    <svg class="chart" viewBox="0 0 640 150" role="img" aria-label="Chance of winning the tournament, Spain 100.0%, Argentina 0.0%" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto"><rect x="108" y="14" width="22" height="11" rx="3" fill="#16a34a"/><text class="c-lab" x="136" y="23">blend</text><path d="M204 13 l7 7 -7 7 -7 -7 z" fill="none" stroke="var(--ink)" stroke-width="2"/><text class="c-lab" x="216" y="23">model only</text><title>Spain: blend 100.0%, model 100.0%</title><text class="c-lab team" x="96" y="70.0" text-anchor="end">Spain</text><g><title>Spain: blend 100.0%, model 100.0%</title><rect x="108" y="56.0" width="466.0" height="18" rx="3" fill="#16a34a" style="filter:drop-shadow(0 0 5px rgba(22,163,74,.40))"/></g><path d="M574.0 57.0 l8 8 -8 8 -8 -8 z" fill="var(--bg)" stroke="var(--ink)" stroke-width="2"/><text class="c-val" x="586.0" y="70.0">100.0%</text><title>Argentina: blend 0.0%, model 0.0%</title><text class="c-lab team" x="96" y="120.0" text-anchor="end">Argentina</text><g><title>Argentina: blend 0.0%, model 0.0%</title><rect x="108" y="106.0" width="0.0" height="18" rx="3" fill="#16a34a" style="filter:drop-shadow(0 0 5px rgba(22,163,74,.40))"/></g><path d="M108.0 107.0 l8 8 -8 8 -8 -8 z" fill="var(--bg)" stroke="var(--ink)" stroke-width="2"/><text class="c-val" x="120.0" y="120.0">0.0%</text></svg>
+    <p class="chart-note">Bar: published blend (70% market / 30% model). Diamond marks the model-only estimate.</p>
+    <details class="c-details">
+      <summary>Winner probabilities table</summary>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Team</th><th>Blend</th><th>Model only</th></tr></thead>
+        <tbody><tr><td>Spain</td><td class="num">100.0%</td><td class="num">100.0%</td></tr><tr><td>Argentina</td><td class="num">0.0%</td><td class="num">0.0%</td></tr></tbody>
+      </table></div>
+    </details>
+  </section>
+
+  <div class="stack">
+    <section class="panel scored">
+      <h3 class="panel-h">Goals scored per game</h3>
+      <div class="mrow"><span class="mteam">England</span><span class="mtrack"><span class="mbar" style="width:100%"></span></span><span class="mval">2.50</span></div>
+<div class="mrow"><span class="mteam">France</span><span class="mtrack"><span class="mbar" style="width:100%"></span></span><span class="mval">2.50</span></div>
+<div class="mrow"><span class="mteam">Argentina</span><span class="mtrack"><span class="mbar" style="width:95%"></span></span><span class="mval">2.38</span></div>
+<div class="mrow"><span class="mteam">Spain</span><span class="mtrack"><span class="mbar" style="width:70%"></span></span><span class="mval">1.75</span></div>
+      <p class="chart-note">Remaining semifinalists, all rounds of WC 2026.</p>
+    </section>
+    <section class="panel conceded">
+      <h3 class="panel-h">Goals conceded per game</h3>
+      <div class="mrow"><span class="mteam">Spain</span><span class="mtrack"><span class="mbar" style="width:8%"></span></span><span class="mval">0.12</span></div>
+<div class="mrow"><span class="mteam">Argentina</span><span class="mtrack"><span class="mbar" style="width:67%"></span></span><span class="mval">1.00</span></div>
+<div class="mrow"><span class="mteam">France</span><span class="mtrack"><span class="mbar" style="width:83%"></span></span><span class="mval">1.25</span></div>
+<div class="mrow"><span class="mteam">England</span><span class="mtrack"><span class="mbar" style="width:100%"></span></span><span class="mval">1.50</span></div>
+      <p class="chart-note">Lower is a meaner defence.</p>
+    </section>
+  </div>
+
+  <!-- featured W/D/L + divergence (drop out together when no market data) -->
+  
+  
+
+  <!-- odds timeline (drops out when no odds history) -->
+  
+
+  <section class="panel c4">
+    <h3 class="panel-h">Remaining fixtures</h3>
+    
+    <p class="chart-note">Model probabilities only &mdash; the books had not priced these pairings at the last data pull. The advance call folds in extra time and penalties.</p>
+  </section>
+
+  <!-- per-match V2 extras: goals markets + player props (empty when no match has extras) -->
+  
+
+  <section class="panel c8">
+    <h3 class="panel-h">Calibration &middot; model probability of the outcome that happened</h3>
+    <div class="record-head">
+      <div class="hit-fig">75<small>%</small></div>
+      <p class="hit-cap">24 of 32 knockout games called &mdash; the model&rsquo;s top 90-minute pick was the result</p>
+      <div>
+        <div class="strip" role="img" aria-label="32 knockout matches in order: filled green cells were called correctly, red-outlined cells were missed.">
+          <span class="cell" title="28 Jun &middot; South Africa v Canada &middot; model 22.0% / 25.2% / 52.8% &middot; result 0-1 &middot; called"></span>
+<span class="cell" title="29 Jun &middot; Brazil v Japan &middot; model 47.8% / 26.3% / 25.9% &middot; result 2-1 &middot; called"></span>
+<span class="cell miss" title="29 Jun &middot; Germany v Paraguay &middot; model 47.1% / 26.5% / 26.4% &middot; result 1-1 (pens) &middot; missed"></span>
+<span class="cell miss" title="29 Jun &middot; Netherlands v Morocco &middot; model 39.0% / 27.4% / 33.6% &middot; result 1-1 (pens) &middot; missed"></span>
+<span class="cell" title="30 Jun &middot; Ivory Coast v Norway &middot; model 24.1% / 25.9% / 50.0% &middot; result 1-2 &middot; called"></span>
+<span class="cell" title="30 Jun &middot; France v Sweden &middot; model 78.4% / 14.6% / 7.0% &middot; result 3-0 &middot; called"></span>
+<span class="cell" title="30 Jun &middot; Mexico v Ecuador &middot; model 50.4% / 25.8% / 23.8% &middot; result 2-0 &middot; called"></span>
+<span class="cell" title="1 Jul &middot; England v DR Congo &middot; model 69.6% / 19.1% / 11.4% &middot; result 2-1 &middot; called"></span>
+<span class="cell" title="1 Jul &middot; Belgium v Senegal &middot; model 42.8% / 27.1% / 30.1% &middot; result 3-2 &middot; called"></span>
+<span class="cell" title="1 Jul &middot; United States v Bosnia and Herzegovina &middot; model 69.6% / 19.0% / 11.4% &middot; result 2-0 &middot; called"></span>
+<span class="cell" title="2 Jul &middot; Spain v Austria &middot; model 71.3% / 18.3% / 10.5% &middot; result 3-0 &middot; called"></span>
+<span class="cell" title="2 Jul &middot; Portugal v Croatia &middot; model 46.1% / 26.6% / 27.3% &middot; result 2-1 &middot; called"></span>
+<span class="cell" title="2 Jul &middot; Switzerland v Algeria &middot; model 47.1% / 26.5% / 26.5% &middot; result 2-0 &middot; called"></span>
+<span class="cell miss" title="3 Jul &middot; Australia v Egypt &middot; model 42.2% / 27.2% / 30.6% &middot; result 1-1 (pens) &middot; missed"></span>
+<span class="cell" title="3 Jul &middot; Argentina v Cape Verde &middot; model 89.7% / 7.7% / 2.6% &middot; result 3-2 &middot; called"></span>
+<span class="cell" title="3 Jul &middot; Colombia v Ghana &middot; model 80.6% / 13.3% / 6.1% &middot; result 1-0 &middot; called"></span>
+<span class="cell" title="4 Jul &middot; Canada v Morocco &middot; model 21.2% / 24.9% / 53.8% &middot; result 0-3 &middot; called"></span>
+<span class="cell" title="4 Jul &middot; Paraguay v France &middot; model 11.5% / 19.1% / 69.4% &middot; result 0-1 &middot; called"></span>
+<span class="cell miss" title="5 Jul &middot; Brazil v Norway &middot; model 49.4% / 26.0% / 24.6% &middot; result 1-2 &middot; missed"></span>
+<span class="cell miss" title="5 Jul &middot; Mexico v England &middot; model 39.5% / 27.4% / 33.1% &middot; result 2-3 &middot; missed"></span>
+<span class="cell" title="6 Jul &middot; Portugal v Spain &middot; model 21.7% / 25.1% / 53.2% &middot; result 0-1 &middot; called"></span>
+<span class="cell miss" title="6 Jul &middot; United States v Belgium &middot; model 36.8% / 27.5% / 35.7% &middot; result 1-4 &middot; missed"></span>
+<span class="cell" title="7 Jul &middot; Argentina v Egypt &middot; model 77.2% / 15.2% / 7.6% &middot; result 3-2 &middot; called"></span>
+<span class="cell miss" title="7 Jul &middot; Switzerland v Colombia &middot; model 28.3% / 26.8% / 44.9% &middot; result 0-0 (pens) &middot; missed"></span>
+<span class="cell" title="9 Jul &middot; France v Morocco &middot; model 53.8% / 24.9% / 21.3% &middot; result 2-0 &middot; called"></span>
+<span class="cell" title="10 Jul &middot; Spain v Belgium &middot; model 59.7% / 23.1% / 17.2% &middot; result 2-1 &middot; called"></span>
+<span class="cell" title="11 Jul &middot; Norway v England &middot; model 25.1% / 26.2% / 48.7% &middot; result 1-2 &middot; called"></span>
+<span class="cell" title="11 Jul &middot; Argentina v Switzerland &middot; model 60.8% / 22.7% / 16.5% &middot; result 3-1 &middot; called"></span>
+<span class="cell" title="14 Jul &middot; France v Spain &middot; model 33.7% / 27.4% / 38.9% &middot; result 0-2 &middot; called"></span>
+<span class="cell" title="15 Jul &middot; England v Argentina &middot; model 27.5% / 26.7% / 45.9% &middot; result 1-2 &middot; called"></span>
+<span class="cell miss" title="18 Jul &middot; France v England &middot; model 41.1% / 27.3% / 31.6% &middot; result 4-6 &middot; missed"></span>
+<span class="cell" title="19 Jul &middot; Spain v Argentina &middot; model 38.6% / 27.5% / 34.0% &middot; result 1-0 &middot; called"></span>
+        </div>
+        <p class="strip-note">One cell per knockout match, in order played. Filled = called; outlined = missed.</p>
+      </div>
+    </div>
+    <svg class="chart" viewBox="0 0 680 300" role="img" aria-label="Calibration: model probability for the outcome that happened in 32 matches; 24 called correctly. Filled green dots are hits, red rings are misses. Reference line at 33 percent." preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto"><line class="c-grid" x1="46" y1="260.0" x2="662" y2="260.0"/><text class="c-axis" x="38" y="264.0" text-anchor="end">0%</text><line class="c-grid" x1="46" y1="199.5" x2="662" y2="199.5"/><text class="c-axis" x="38" y="203.5" text-anchor="end">25%</text><line class="c-grid" x1="46" y1="139.0" x2="662" y2="139.0"/><text class="c-axis" x="38" y="143.0" text-anchor="end">50%</text><line class="c-grid" x1="46" y1="78.5" x2="662" y2="78.5"/><text class="c-axis" x="38" y="82.5" text-anchor="end">75%</text><line class="c-grid" x1="46" y1="18.0" x2="662" y2="18.0"/><text class="c-axis" x="38" y="22.0" text-anchor="end">100%</text><line class="c-ref" x1="46" y1="179.3" x2="662" y2="179.3"/><text class="c-axis ref" x="662" y="173.3" text-anchor="end">33% baseline</text><text class="c-axis" x="46.0" y="280.0" text-anchor="middle">Jun</text><text class="c-axis" x="134.0" y="280.0" text-anchor="middle">Jul</text><g><title>28 Jun — South Africa v Canada: model 52.8% for the actual result (0-1), called</title><circle cx="46.0" cy="132.3" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>29 Jun — Brazil v Japan: model 47.8% for the actual result (2-1), called</title><circle cx="66.3" cy="144.4" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>29 Jun — Netherlands v Morocco: model 27.4% for the actual result (1-1 (pens)), missed</title><circle cx="75.3" cy="193.6" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>29 Jun — Germany v Paraguay: model 26.5% for the actual result (1-1 (pens)), missed</title><circle cx="84.3" cy="195.9" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>30 Jun — France v Sweden: model 78.5% for the actual result (3-0), called</title><circle cx="95.7" cy="70.2" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>30 Jun — Mexico v Ecuador: model 50.4% for the actual result (2-0), called</title><circle cx="104.7" cy="138.0" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>30 Jun — Ivory Coast v Norway: model 50.0% for the actual result (1-2), called</title><circle cx="113.7" cy="139.0" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>01 Jul — United States v Bosnia and Herzegovina: model 69.6% for the actual result (2-0), called</title><circle cx="125.0" cy="91.6" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>01 Jul — England v DR Congo: model 69.6% for the actual result (2-1), called</title><circle cx="134.0" cy="91.7" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>01 Jul — Belgium v Senegal: model 42.8% for the actual result (3-2), called</title><circle cx="143.0" cy="156.4" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>02 Jul — Spain v Austria: model 71.3% for the actual result (3-0), called</title><circle cx="154.3" cy="87.6" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>02 Jul — Switzerland v Algeria: model 47.1% for the actual result (2-0), called</title><circle cx="163.3" cy="146.1" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>02 Jul — Portugal v Croatia: model 46.1% for the actual result (2-1), called</title><circle cx="172.3" cy="148.5" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>03 Jul — Argentina v Cape Verde: model 89.7% for the actual result (3-2), called</title><circle cx="183.7" cy="42.9" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>03 Jul — Colombia v Ghana: model 80.6% for the actual result (1-0), called</title><circle cx="192.7" cy="65.0" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>03 Jul — Australia v Egypt: model 27.2% for the actual result (1-1 (pens)), missed</title><circle cx="201.7" cy="194.2" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>04 Jul — Paraguay v France: model 69.4% for the actual result (0-1), called</title><circle cx="217.5" cy="92.1" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>04 Jul — Canada v Morocco: model 53.8% for the actual result (0-3), called</title><circle cx="226.5" cy="129.7" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>05 Jul — Mexico v England: model 33.1% for the actual result (2-3), missed</title><circle cx="246.8" cy="179.8" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>05 Jul — Brazil v Norway: model 24.6% for the actual result (1-2), missed</title><circle cx="255.8" cy="200.5" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>06 Jul — Portugal v Spain: model 53.2% for the actual result (0-1), called</title><circle cx="276.2" cy="131.2" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>06 Jul — United States v Belgium: model 35.7% for the actual result (1-4), missed</title><circle cx="285.2" cy="173.6" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>07 Jul — Argentina v Egypt: model 77.2% for the actual result (3-2), called</title><circle cx="305.5" cy="73.2" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>07 Jul — Switzerland v Colombia: model 26.8% for the actual result (0-0 (pens)), missed</title><circle cx="314.5" cy="195.0" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>09 Jul — France v Morocco: model 53.8% for the actual result (2-0), called</title><circle cx="368.7" cy="129.9" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>10 Jul — Spain v Belgium: model 59.7% for the actual result (2-1), called</title><circle cx="398.0" cy="115.6" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>11 Jul — Argentina v Switzerland: model 60.8% for the actual result (3-1), called</title><circle cx="422.8" cy="112.9" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>11 Jul — Norway v England: model 48.7% for the actual result (1-2), called</title><circle cx="431.8" cy="142.1" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>14 Jul — France v Spain: model 38.9% for the actual result (0-2), called</title><circle cx="515.3" cy="166.0" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>15 Jul — England v Argentina: model 45.9% for the actual result (1-2), called</title><circle cx="544.7" cy="149.0" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g><g><title>18 Jul — France v England: model 31.6% for the actual result (4-6), missed</title><circle cx="632.7" cy="183.6" r="5" fill="none" stroke="#f43f5e" stroke-width="2.5"/></g><g><title>19 Jul — Spain v Argentina: model 38.6% for the actual result (1-0), called</title><circle cx="662.0" cy="166.7" r="5" fill="#4ade80" style="filter:drop-shadow(0 0 5px rgba(74,222,128,.45))"/></g></svg>
+    <p class="chart-note">Each dot is one knockout match. Below the dashed 33% line the model read the match worse than a blind three-way guess. Filled green = called, red ring = missed.</p>
+    <details class="record">
+      <summary>Full match-by-match record</summary>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Date</th><th>Match</th><th>Model W / D / L</th><th>Result</th><th>Called</th></tr></thead>
+        <tbody><tr class="hit"><td>28 Jun</td><td>South Africa v Canada</td><td class="num">22.0% / 25.2% / 52.8%</td><td class="num">0-1</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>29 Jun</td><td>Brazil v Japan</td><td class="num">47.8% / 26.3% / 25.9%</td><td class="num">2-1</td><td><span class="yes">called</span></td></tr>
+<tr class="miss"><td>29 Jun</td><td>Germany v Paraguay</td><td class="num">47.1% / 26.5% / 26.4%</td><td class="num">1-1 (pens)</td><td><span class="no">missed</span></td></tr>
+<tr class="miss"><td>29 Jun</td><td>Netherlands v Morocco</td><td class="num">39.0% / 27.4% / 33.6%</td><td class="num">1-1 (pens)</td><td><span class="no">missed</span></td></tr>
+<tr class="hit"><td>30 Jun</td><td>Ivory Coast v Norway</td><td class="num">24.1% / 25.9% / 50.0%</td><td class="num">1-2</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>30 Jun</td><td>France v Sweden</td><td class="num">78.4% / 14.6% / 7.0%</td><td class="num">3-0</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>30 Jun</td><td>Mexico v Ecuador</td><td class="num">50.4% / 25.8% / 23.8%</td><td class="num">2-0</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>1 Jul</td><td>England v DR Congo</td><td class="num">69.6% / 19.1% / 11.4%</td><td class="num">2-1</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>1 Jul</td><td>Belgium v Senegal</td><td class="num">42.8% / 27.1% / 30.1%</td><td class="num">3-2</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>1 Jul</td><td>United States v Bosnia and Herzegovina</td><td class="num">69.6% / 19.0% / 11.4%</td><td class="num">2-0</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>2 Jul</td><td>Spain v Austria</td><td class="num">71.3% / 18.3% / 10.5%</td><td class="num">3-0</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>2 Jul</td><td>Portugal v Croatia</td><td class="num">46.1% / 26.6% / 27.3%</td><td class="num">2-1</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>2 Jul</td><td>Switzerland v Algeria</td><td class="num">47.1% / 26.5% / 26.5%</td><td class="num">2-0</td><td><span class="yes">called</span></td></tr>
+<tr class="miss"><td>3 Jul</td><td>Australia v Egypt</td><td class="num">42.2% / 27.2% / 30.6%</td><td class="num">1-1 (pens)</td><td><span class="no">missed</span></td></tr>
+<tr class="hit"><td>3 Jul</td><td>Argentina v Cape Verde</td><td class="num">89.7% / 7.7% / 2.6%</td><td class="num">3-2</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>3 Jul</td><td>Colombia v Ghana</td><td class="num">80.6% / 13.3% / 6.1%</td><td class="num">1-0</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>4 Jul</td><td>Canada v Morocco</td><td class="num">21.2% / 24.9% / 53.8%</td><td class="num">0-3</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>4 Jul</td><td>Paraguay v France</td><td class="num">11.5% / 19.1% / 69.4%</td><td class="num">0-1</td><td><span class="yes">called</span></td></tr>
+<tr class="miss"><td>5 Jul</td><td>Brazil v Norway</td><td class="num">49.4% / 26.0% / 24.6%</td><td class="num">1-2</td><td><span class="no">missed</span></td></tr>
+<tr class="miss"><td>5 Jul</td><td>Mexico v England</td><td class="num">39.5% / 27.4% / 33.1%</td><td class="num">2-3</td><td><span class="no">missed</span></td></tr>
+<tr class="hit"><td>6 Jul</td><td>Portugal v Spain</td><td class="num">21.7% / 25.1% / 53.2%</td><td class="num">0-1</td><td><span class="yes">called</span></td></tr>
+<tr class="miss"><td>6 Jul</td><td>United States v Belgium</td><td class="num">36.8% / 27.5% / 35.7%</td><td class="num">1-4</td><td><span class="no">missed</span></td></tr>
+<tr class="hit"><td>7 Jul</td><td>Argentina v Egypt</td><td class="num">77.2% / 15.2% / 7.6%</td><td class="num">3-2</td><td><span class="yes">called</span></td></tr>
+<tr class="miss"><td>7 Jul</td><td>Switzerland v Colombia</td><td class="num">28.3% / 26.8% / 44.9%</td><td class="num">0-0 (pens)</td><td><span class="no">missed</span></td></tr>
+<tr class="hit"><td>9 Jul</td><td>France v Morocco</td><td class="num">53.8% / 24.9% / 21.3%</td><td class="num">2-0</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>10 Jul</td><td>Spain v Belgium</td><td class="num">59.7% / 23.1% / 17.2%</td><td class="num">2-1</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>11 Jul</td><td>Norway v England</td><td class="num">25.1% / 26.2% / 48.7%</td><td class="num">1-2</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>11 Jul</td><td>Argentina v Switzerland</td><td class="num">60.8% / 22.7% / 16.5%</td><td class="num">3-1</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>14 Jul</td><td>France v Spain</td><td class="num">33.7% / 27.4% / 38.9%</td><td class="num">0-2</td><td><span class="yes">called</span></td></tr>
+<tr class="hit"><td>15 Jul</td><td>England v Argentina</td><td class="num">27.5% / 26.7% / 45.9%</td><td class="num">1-2</td><td><span class="yes">called</span></td></tr>
+<tr class="miss"><td>18 Jul</td><td>France v England</td><td class="num">41.1% / 27.3% / 31.6%</td><td class="num">4-6</td><td><span class="no">missed</span></td></tr>
+<tr class="hit"><td>19 Jul</td><td>Spain v Argentina</td><td class="num">38.6% / 27.5% / 34.0%</td><td class="num">1-0</td><td><span class="yes">called</span></td></tr></tbody>
+      </table></div>
+    </details>
+  </section>
+
+  <section class="panel c4">
+    <h3 class="panel-h">Current Elo &middot; top 12</h3>
+    <div class="tablewrap"><table class="elo-t">
+      <thead><tr><th>#</th><th>Team</th><th>Elo</th></tr></thead>
+      <tbody><tr class="fournations"><td>1</td><td>Spain</td><td class="num">2327</td></tr>
+<tr class="fournations"><td>2</td><td>Argentina</td><td class="num">2250</td></tr>
+<tr class="fournations"><td>3</td><td>England</td><td class="num">2199</td></tr>
+<tr class="fournations"><td>4</td><td>France</td><td class="num">2141</td></tr>
+<tr><td>5</td><td>Colombia</td><td class="num">2087</td></tr>
+<tr><td>6</td><td>Brazil</td><td class="num">2077</td></tr>
+<tr><td>7</td><td>Portugal</td><td class="num">2060</td></tr>
+<tr><td>8</td><td>Netherlands</td><td class="num">2045</td></tr>
+<tr><td>9</td><td>Morocco</td><td class="num">2029</td></tr>
+<tr><td>10</td><td>Belgium</td><td class="num">2027</td></tr>
+<tr><td>11</td><td>Norway</td><td class="num">2021</td></tr>
+<tr><td>12</td><td>Mexico</td><td class="num">2014</td></tr></tbody>
+    </table></div>
+    <p class="chart-note">Bold = remaining semifinalists.</p>
+  </section>
+
+</main>
+
+<footer>
+  <p><b>Method:</b> Elo over ~49,500 internationals sets an expected strength gap; a Poisson goal model turns that into a full scoreline distribution (win / draw / loss, plus advancement through extra time and penalties); 90-minute probabilities are blended 30/70 with a de-vigged bookmaker consensus.</p>
+  <p><b>Caveats:</b> the blend weight is a fixed 30/70 split, not fitted per match; where the books have not priced a pairing, the model stands alone (those fixtures show model-only numbers). This is a statistical model, not betting advice &mdash; a 60% favourite still loses two times in five.</p>
+  <p>Generated 2026-07-19T22:57:38+00:00 from <code>data/site_data.json</code>. Refresh with <code>python site/build.py</code> after each <code>python predict.py</code> run.</p>
+</footer>
+
+</div>
+
+<!--
+  DATA BLOCK — the raw payload this page was generated from.
+  index.html is GENERATED: do not edit it by hand.
+  Regenerate with `python site/build.py` after each `python predict.py` run.
+-->
+<script type="application/json" id="site-data">{"generated_utc":"2026-07-19T22:57:38+00:00","model_version":"V2","matches":[],"winner_model":{"Spain":1.0,"Argentina":0.0},"winner_blend":{"Spain":1.0,"Argentina":0.0},"retro":[{"date":"2026-06-28","match":"South Africa v Canada","model_WDL":"22.0% / 25.2% / 52.8%","actual":"0-1","p_win":0.2203,"p_draw":0.252,"p_loss":0.5278,"called":"yes"},{"date":"2026-06-29","match":"Brazil v Japan","model_WDL":"47.8% / 26.3% / 25.9%","actual":"2-1","p_win":0.4778,"p_draw":0.2634,"p_loss":0.2588,"called":"yes"},{"date":"2026-06-29","match":"Germany v Paraguay","model_WDL":"47.1% / 26.5% / 26.4%","actual":"1-1 (pens)","p_win":0.4712,"p_draw":0.2647,"p_loss":0.2641,"called":"no"},{"date":"2026-06-29","match":"Netherlands v Morocco","model_WDL":"39.0% / 27.4% / 33.6%","actual":"1-1 (pens)","p_win":0.3899,"p_draw":0.2744,"p_loss":0.3357,"called":"no"},{"date":"2026-06-30","match":"Ivory Coast v Norway","model_WDL":"24.1% / 25.9% / 50.0%","actual":"1-2","p_win":0.2412,"p_draw":0.2587,"p_loss":0.5001,"called":"yes"},{"date":"2026-06-30","match":"France v Sweden","model_WDL":"78.4% / 14.6% / 7.0%","actual":"3-0","p_win":0.7845,"p_draw":0.1455,"p_loss":0.07,"called":"yes"},{"date":"2026-06-30","match":"Mexico v Ecuador","model_WDL":"50.4% / 25.8% / 23.8%","actual":"2-0","p_win":0.5043,"p_draw":0.2578,"p_loss":0.2379,"called":"yes"},{"date":"2026-07-01","match":"England v DR Congo","model_WDL":"69.6% / 19.1% / 11.4%","actual":"2-1","p_win":0.6956,"p_draw":0.1906,"p_loss":0.1138,"called":"yes"},{"date":"2026-07-01","match":"Belgium v Senegal","model_WDL":"42.8% / 27.1% / 30.1%","actual":"3-2","p_win":0.4283,"p_draw":0.2711,"p_loss":0.3005,"called":"yes"},{"date":"2026-07-01","match":"United States v Bosnia and Herzegovina","model_WDL":"69.6% / 19.0% / 11.4%","actual":"2-0","p_win":0.696,"p_draw":0.1904,"p_loss":0.1136,"called":"yes"},{"date":"2026-07-02","match":"Spain v Austria","model_WDL":"71.3% / 18.3% / 10.5%","actual":"3-0","p_win":0.7126,"p_draw":0.1826,"p_loss":0.1048,"called":"yes"},{"date":"2026-07-02","match":"Portugal v Croatia","model_WDL":"46.1% / 26.6% / 27.3%","actual":"2-1","p_win":0.4609,"p_draw":0.2665,"p_loss":0.2726,"called":"yes"},{"date":"2026-07-02","match":"Switzerland v Algeria","model_WDL":"47.1% / 26.5% / 26.5%","actual":"2-0","p_win":0.4707,"p_draw":0.2648,"p_loss":0.2646,"called":"yes"},{"date":"2026-07-03","match":"Australia v Egypt","model_WDL":"42.2% / 27.2% / 30.6%","actual":"1-1 (pens)","p_win":0.4216,"p_draw":0.2719,"p_loss":0.3065,"called":"no"},{"date":"2026-07-03","match":"Argentina v Cape Verde","model_WDL":"89.7% / 7.7% / 2.6%","actual":"3-2","p_win":0.8973,"p_draw":0.0766,"p_loss":0.0262,"called":"yes"},{"date":"2026-07-03","match":"Colombia v Ghana","model_WDL":"80.6% / 13.3% / 6.1%","actual":"1-0","p_win":0.8059,"p_draw":0.1335,"p_loss":0.0607,"called":"yes"},{"date":"2026-07-04","match":"Canada v Morocco","model_WDL":"21.2% / 24.9% / 53.8%","actual":"0-3","p_win":0.2125,"p_draw":0.2491,"p_loss":0.5385,"called":"yes"},{"date":"2026-07-04","match":"Paraguay v France","model_WDL":"11.5% / 19.1% / 69.4%","actual":"0-1","p_win":0.1148,"p_draw":0.1914,"p_loss":0.6937,"called":"yes"},{"date":"2026-07-05","match":"Brazil v Norway","model_WDL":"49.4% / 26.0% / 24.6%","actual":"1-2","p_win":0.4941,"p_draw":0.2601,"p_loss":0.2458,"called":"no"},{"date":"2026-07-05","match":"Mexico v England","model_WDL":"39.5% / 27.4% / 33.1%","actual":"2-3","p_win":0.3947,"p_draw":0.2741,"p_loss":0.3312,"called":"no"},{"date":"2026-07-06","match":"Portugal v Spain","model_WDL":"21.7% / 25.1% / 53.2%","actual":"0-1","p_win":0.2171,"p_draw":0.2508,"p_loss":0.5321,"called":"yes"},{"date":"2026-07-06","match":"United States v Belgium","model_WDL":"36.8% / 27.5% / 35.7%","actual":"1-4","p_win":0.3679,"p_draw":0.2751,"p_loss":0.357,"called":"no"},{"date":"2026-07-07","match":"Argentina v Egypt","model_WDL":"77.2% / 15.2% / 7.6%","actual":"3-2","p_win":0.7719,"p_draw":0.1524,"p_loss":0.0757,"called":"yes"},{"date":"2026-07-07","match":"Switzerland v Colombia","model_WDL":"28.3% / 26.8% / 44.9%","actual":"0-0 (pens)","p_win":0.283,"p_draw":0.2684,"p_loss":0.4486,"called":"no"},{"date":"2026-07-09","match":"France v Morocco","model_WDL":"53.8% / 24.9% / 21.3%","actual":"2-0","p_win":0.5377,"p_draw":0.2493,"p_loss":0.213,"called":"yes"},{"date":"2026-07-10","match":"Spain v Belgium","model_WDL":"59.7% / 23.1% / 17.2%","actual":"2-1","p_win":0.5968,"p_draw":0.2307,"p_loss":0.1725,"called":"yes"},{"date":"2026-07-11","match":"Norway v England","model_WDL":"25.1% / 26.2% / 48.7%","actual":"1-2","p_win":0.2514,"p_draw":0.2616,"p_loss":0.487,"called":"yes"},{"date":"2026-07-11","match":"Argentina v Switzerland","model_WDL":"60.8% / 22.7% / 16.5%","actual":"3-1","p_win":0.6079,"p_draw":0.2268,"p_loss":0.1653,"called":"yes"},{"date":"2026-07-14","match":"France v Spain","model_WDL":"33.7% / 27.4% / 38.9%","actual":"0-2","p_win":0.337,"p_draw":0.2745,"p_loss":0.3885,"called":"yes"},{"date":"2026-07-15","match":"England v Argentina","model_WDL":"27.5% / 26.7% / 45.9%","actual":"1-2","p_win":0.2745,"p_draw":0.2669,"p_loss":0.4586,"called":"yes"},{"date":"2026-07-18","match":"France v England","model_WDL":"41.1% / 27.3% / 31.6%","actual":"4-6","p_win":0.4112,"p_draw":0.2729,"p_loss":0.3159,"called":"no"},{"date":"2026-07-19","match":"Spain v Argentina","model_WDL":"38.6% / 27.5% / 34.0%","actual":"1-0","p_win":0.3857,"p_draw":0.2746,"p_loss":0.3397,"called":"yes"}],"elo_top":{"Spain":2327.0,"Argentina":2250.0,"England":2199.0,"France":2141.0,"Colombia":2087.0,"Brazil":2077.0,"Portugal":2060.0,"Netherlands":2045.0,"Morocco":2029.0,"Belgium":2027.0,"Norway":2021.0,"Mexico":2014.0},"goals_2026":{"Spain":{"games":8,"scored":14,"conceded":1},"Argentina":{"games":8,"scored":19,"conceded":8},"England":{"games":8,"scored":20,"conceded":12},"France":{"games":8,"scored":20,"conceded":10}},"blend_weight_model":0.3}</script>
+</body>
+</html>
